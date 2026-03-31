@@ -12,6 +12,7 @@ import { createHmac, randomBytes } from 'crypto';
 import { readFileSync, writeFileSync, existsSync, statSync, readdirSync } from 'fs';
 import os from 'os';
 import webpush from 'web-push';
+import pty from 'node-pty';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -31,6 +32,11 @@ if (existsSync(configPath)) {
 const PORTS = userConfig.cdpPorts || [9000, 9001, 9002, 9003];
 const DISCOVERY_INTERVAL = 10000;
 const POLL_INTERVAL = 3000;
+
+// Terminal config
+const TERMINAL_ENABLED = userConfig.terminal?.enabled !== false; // default: true
+const TERMINAL_SHELL = userConfig.terminal?.shell || (process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/bash');
+const TERMINAL_MAX_SESSIONS = userConfig.terminal?.maxSessions || 3;
 
 // Auth config (config.json > env vars > defaults)
 const AUTH_PASSWORD = userConfig.password || process.env.PASSWORD || 'shitchat';
@@ -69,6 +75,73 @@ const MANAGER_PASSWORD = userConfig.managerPassword || process.env.MANAGER_PASSW
 // Application State
 let cascades = new Map();
 let wss = null;
+
+// --- PTY Terminal Sessions ---
+const ptySessions = new Map();
+let ptyIdCounter = 0;
+
+function createPtySession() {
+    if (!TERMINAL_ENABLED) return { error: 'Terminal is disabled' };
+    if (ptySessions.size >= TERMINAL_MAX_SESSIONS) return { error: `Max ${TERMINAL_MAX_SESSIONS} sessions reached` };
+    const id = `term_${++ptyIdCounter}`;
+    const shell = TERMINAL_SHELL;
+    const cwd = process.env.HOME || process.cwd();
+    const ptyProc = pty.spawn(shell, [], {
+        name: 'xterm-256color',
+        cols: 80,
+        rows: 24,
+        cwd,
+        env: { ...process.env, TERM: 'xterm-256color' },
+    });
+    const session = { id, pty: ptyProc, shell, cwd, createdAt: Date.now() };
+    ptyProc.onData((data) => {
+        broadcastToAuthed(JSON.stringify({ type: 'terminal_output', sessionId: id, data }));
+    });
+    ptyProc.onExit(({ exitCode }) => {
+        ptySessions.delete(id);
+        broadcastToAuthed(JSON.stringify({ type: 'terminal_exit', sessionId: id, exitCode }));
+        console.log(`🖥️ Terminal ${id} exited (code=${exitCode})`);
+    });
+    ptySessions.set(id, session);
+    console.log(`🖥️ Terminal ${id} created (shell=${shell})`);
+    return { id, shell, cwd };
+}
+
+function resizePtySession(id, cols, rows) {
+    const session = ptySessions.get(id);
+    if (!session) return false;
+    session.pty.resize(Math.max(1, cols), Math.max(1, rows));
+    return true;
+}
+
+function closePtySession(id) {
+    const session = ptySessions.get(id);
+    if (!session) return false;
+    session.pty.kill();
+    ptySessions.delete(id);
+    console.log(`🖥️ Terminal ${id} closed`);
+    return true;
+}
+
+function cleanupAllPty() {
+    for (const [id, session] of ptySessions) {
+        try { session.pty.kill(); } catch (e) { }
+    }
+    ptySessions.clear();
+}
+
+process.on('exit', cleanupAllPty);
+process.on('SIGINT', () => { cleanupAllPty(); process.exit(); });
+process.on('SIGTERM', () => { cleanupAllPty(); process.exit(); });
+
+function broadcastToAuthed(data) {
+    if (!wss) return;
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(data);
+        }
+    });
+}
 
 // --- Web Push Setup ---
 let vapidKeys = userConfig.vapidKeys;
@@ -948,6 +1021,16 @@ async function main() {
         res.sendFile(join(__dirname, 'public', 'login.html'));
     });
 
+    app.get('/sw.js', (req, res) => {
+        res.sendFile(join(__dirname, 'dist', 'sw.js'));
+    });
+    app.get('/registerSW.js', (req, res) => {
+        res.sendFile(join(__dirname, 'dist', 'registerSW.js'));
+    });
+    app.get('/manifest.webmanifest', (req, res) => {
+        res.sendFile(join(__dirname, 'dist', 'manifest.webmanifest'));
+    });
+
     // Auth middleware —protects everything else
     app.use((req, res, next) => {
         const cookies = parseCookies(req.headers.cookie);
@@ -1399,6 +1482,25 @@ async function main() {
             res.json({ name: null });
         } catch (e) {
             res.json({ name: null });
+        }
+    });
+
+    // --- Read File by Absolute Path ---
+    app.get('/api/read-file', async (req, res) => {
+        try {
+            let filePath = decodeURIComponent(req.query.path || '');
+            if (!filePath) return res.status(400).json({ error: 'path required' });
+            if (filePath.startsWith('~')) filePath = filePath.replace('~', os.homedir());
+            if (!path.isAbsolute(filePath)) return res.status(400).json({ error: 'absolute path required' });
+            const stat = statSync(filePath);
+            if (stat.size > 1024 * 1024) return res.status(413).json({ error: 'File too large (>1MB)' });
+            const content = readFileSync(filePath, 'utf-8');
+            const ext = path.extname(filePath).toLowerCase().slice(1);
+            const filename = path.basename(filePath);
+            res.json({ type: 'file', content, filename, ext, path: filePath });
+        } catch (e) {
+            if (e.code === 'ENOENT') return res.status(404).json({ error: `File not found: ${req.query.path}` });
+            res.status(500).json({ error: e.message });
         }
     });
 
@@ -2359,6 +2461,62 @@ async function main() {
     });
 
 
+    app.use('/assets', express.static(join(__dirname, 'dist', 'assets'), {
+        immutable: true,
+        maxAge: '1y',
+    }));
+
+    app.use(express.static(join(__dirname, 'dist'), {
+        setHeaders(res, filePath) {
+            if (filePath.endsWith('.html')) {
+                res.setHeader('Cache-Control', 'no-cache');
+            }
+        },
+    }));
+
+    app.get('*', (req, res, next) => {
+        if (req.path.startsWith('/api') ||
+            req.path.startsWith('/cascades') ||
+            req.path.startsWith('/snapshot') ||
+            req.path.startsWith('/styles') ||
+            req.path.startsWith('/send') ||
+            req.path.startsWith('/click') ||
+            req.path.startsWith('/scroll') ||
+            req.path.startsWith('/popup') ||
+            req.path.startsWith('/dismiss') ||
+            req.path.startsWith('/new-conversation') ||
+            req.path.startsWith('/ws')) {
+            return next();
+        }
+        res.setHeader('Cache-Control', 'no-cache');
+        res.sendFile(join(__dirname, 'dist', 'index.html'));
+    });
+
+    // --- Terminal REST Endpoints ---
+    app.post('/api/terminal/create', (req, res) => {
+        const result = createPtySession();
+        if (result.error) return res.status(400).json({ error: result.error });
+        res.json({ success: true, ...result });
+    });
+
+    app.post('/api/terminal/resize/:sessionId', (req, res) => {
+        const { cols, rows } = req.body;
+        const ok = resizePtySession(req.params.sessionId, cols, rows);
+        res.json({ success: ok });
+    });
+
+    app.post('/api/terminal/close/:sessionId', (req, res) => {
+        const ok = closePtySession(req.params.sessionId);
+        res.json({ success: ok });
+    });
+
+    app.get('/api/terminal/list', (req, res) => {
+        const sessions = Array.from(ptySessions.values()).map(s => ({
+            id: s.id, shell: s.shell, cwd: s.cwd, createdAt: s.createdAt
+        }));
+        res.json({ enabled: TERMINAL_ENABLED, sessions });
+    });
+
     // WebSocket auth check
     wss.on('connection', (ws, req) => {
         const cookies = parseCookies(req.headers.cookie);
@@ -2367,6 +2525,19 @@ async function main() {
             return;
         }
         broadcastCascadeList(); // Send list on connect
+
+        // Handle terminal input via WS
+        ws.on('message', (raw) => {
+            try {
+                const msg = JSON.parse(raw);
+                if (msg.type === 'terminal_input' && msg.sessionId && msg.data) {
+                    const session = ptySessions.get(msg.sessionId);
+                    if (session) session.pty.write(msg.data);
+                } else if (msg.type === 'terminal_resize' && msg.sessionId) {
+                    resizePtySession(msg.sessionId, msg.cols, msg.rows);
+                }
+            } catch (e) { /* ignore parse errors */ }
+        });
     });
 
     const PORT = userConfig.port || process.env.PORT || 3563;

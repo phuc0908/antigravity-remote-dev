@@ -44,3 +44,8 @@ temp_snapshot.html
 editor_snapshot*.html
 test-monaco-dom.js
 *.html.bak
+
+# AI agent config
+.claude/
+.sisyphus/
+dist/
