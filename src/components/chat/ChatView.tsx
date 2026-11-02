@@ -4,6 +4,7 @@ import morphdom from 'morphdom';
 import { useAppStore } from '../../store';
 import {
   clickElement, scrollView, openPopup, clickPopup, dismissPopup,
+  getSnapshot, getStyles,
 } from '../../services/api';
 import PopupBubble from './PopupBubble';
 
@@ -42,6 +43,20 @@ export default function ChatView({ cascadeId }: ChatViewProps) {
   const [popup, setPopup] = useState<PopupState | null>(null);
 
   useEffect(() => {
+    if (!cascadeId) return;
+    if (!snapshot) {
+      void getSnapshot(cascadeId)
+        .then((snap) => useAppStore.getState().setSnapshot(cascadeId, snap))
+        .catch(() => {});
+    }
+    if (!styles) {
+      void getStyles(cascadeId)
+        .then((sty) => useAppStore.getState().setStyles(cascadeId, sty))
+        .catch(() => {});
+    }
+  }, [cascadeId, snapshot, styles]);
+
+  useEffect(() => {
     if (!hostRef.current) return;
     if (hostRef.current.shadowRoot) {
       shadowRef.current = hostRef.current.shadowRoot;
@@ -53,7 +68,85 @@ export default function ChatView({ cascadeId }: ChatViewProps) {
 
     const baseStyle = document.createElement('style');
     baseStyle.id = 'base-style';
-    baseStyle.textContent = ':host { display: block; width: 100%; height: 100%; overflow: auto; } .loading { display:flex; align-items:center; justify-content:center; height:200px; color:#999; font-size:14px; }';
+    baseStyle.textContent = `
+      :host {
+        display: block;
+        width: 100%;
+        height: 100%;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        box-sizing: border-box;
+      }
+      #chat-mount, #chat-viewport, .chat-viewport,
+      [data-testid="conversation-view"], [data-testid="autoscroll-viewport"],
+      [class*="conversation-view"], #root {
+        width: 100%;
+        max-width: 100%;
+        min-height: 100%;
+        display: flex;
+        flex-direction: column;
+        box-sizing: border-box;
+      }
+      [data-testid="conversation-view"], [data-testid="autoscroll-viewport"] {
+        height: auto !important;
+        overflow-y: visible !important;
+        overflow-x: hidden !important;
+      }
+      #antigravity\\.agentSidePanelInputBox,
+      [class*="surface-composer"] {
+        display: none !important;
+      }
+      .pointer-events-none.absolute.inset-y-0.left-0.z-10.w-7,
+      [data-testid="conversation-navigator"] {
+        display: none !important;
+      }
+      .absolute.bottom-0[style*="linear-gradient"],
+      [style*="linear-gradient(to top"],
+      [style*="linear-gradient(to bottom"],
+      [style*="linear-gradient"],
+      .md-sticky-message-bleed::after,
+      .md-sticky-message-bleed::before,
+      [class*="md-sticky-message-bleed"]::after,
+      [class*="md-sticky-message-bleed"]::before,
+      [class*="after:bg-gradient"],
+      [class*="before:bg-gradient"] {
+        display: none !important;
+        content: none !important;
+        background: transparent !important;
+      }
+      [role="article"].sticky,
+      [role="article"][class*="sticky"],
+      [class*="sticky"][class*="top-0"] {
+        position: relative !important;
+        top: auto !important;
+        z-index: 1 !important;
+      }
+      [role="article"][aria-label="User message"] {
+        background: rgba(9, 105, 218, 0.08) !important;
+        border: 1px solid rgba(128, 128, 128, 0.2) !important;
+        border-radius: 16px !important;
+        padding: 10px 14px !important;
+        margin-top: 10px !important;
+        margin-bottom: 14px !important;
+        max-width: 95% !important;
+      }
+      [data-testid="conversation-view"] {
+        padding: 12px 14px 32px 14px !important;
+      }
+      [data-testid="conversation-view"] p,
+      [data-testid="conversation-view"] li {
+        font-size: 15px !important;
+        line-height: 1.6 !important;
+      }
+      .loading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 200px;
+        color: #999;
+        font-size: 14px;
+      }
+    `;
     shadow.appendChild(baseStyle);
 
     const ideStyle = document.createElement('style');
@@ -70,6 +163,7 @@ export default function ChatView({ cascadeId }: ChatViewProps) {
 
     const mount = document.createElement('div');
     mount.id = 'chat-mount';
+    mount.className = 'chat-viewport';
     mount.innerHTML = '<div class="loading">Waiting for content...</div>';
     shadow.appendChild(mount);
     mountRef.current = mount;
@@ -113,28 +207,46 @@ export default function ChatView({ cascadeId }: ChatViewProps) {
     if (!shadowRef.current || !mountRef.current || !snapshot?.html) return;
 
     const fragment = DOMPurify.sanitize(snapshot.html, {
-      USE_PROFILES: { html: true },
+      USE_PROFILES: { html: true, svg: true },
       RETURN_DOM_FRAGMENT: true,
-      ADD_ATTR: ['data-cdp-click', 'data-file-name', 'data-tooltip-id'],
+      ADD_TAGS: ['style'],
+      ADD_ATTR: [
+        'data-cdp-click',
+        'data-file-name',
+        'data-tooltip-id',
+        'data-turn-id',
+        'data-message-id',
+        'data-testid',
+        'data-cascade-id',
+        'data-quotable',
+        'style',
+      ],
+      ALLOW_DATA_ATTR: true,
       FORCE_BODY: false,
     }) as DocumentFragment;
 
     const wrapper = document.createElement('div');
     wrapper.id = 'chat-mount';
+    wrapper.className = 'chat-viewport';
     while (fragment.firstChild) {
       wrapper.appendChild(fragment.firstChild);
     }
 
-    morphdom(mountRef.current, wrapper, {
-      childrenOnly: false,
-      onBeforeElUpdated: (from: Element, to: Element) => {
-        if (from.isEqualNode(to)) return false;
-        if (from instanceof HTMLTextAreaElement && to instanceof HTMLTextAreaElement) {
-          to.value = from.value;
-        }
-        return true;
-      },
-    });
+    try {
+      morphdom(mountRef.current, wrapper, {
+        childrenOnly: false,
+        onBeforeElUpdated: (from: Element, to: Element) => {
+          if (from.isEqualNode(to)) return false;
+          if (from instanceof HTMLTextAreaElement && to instanceof HTMLTextAreaElement) {
+            to.value = from.value;
+          }
+          return true;
+        },
+      });
+    } catch (err) {
+      console.warn('morphdom fallback to replaceChildren:', err);
+      mountRef.current.replaceChildren(...Array.from(wrapper.childNodes));
+    }
 
     mountRef.current = shadowRef.current.querySelector<HTMLDivElement>('#chat-mount') ?? mountRef.current;
 

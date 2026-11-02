@@ -100,8 +100,8 @@
   --z-toast: 500;
 
   /* --- Layout --- */
-  --topbar-height: 44px;
-  --bottomnav-height: 50px;
+  --topbar-height: 52px;
+  --bottomnav-height: 56px;
   --input-height: 48px;
   --drawer-width: 80%;
   --safe-area-top: env(safe-area-inset-top, 0px);

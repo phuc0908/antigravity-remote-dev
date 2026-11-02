@@ -249,9 +249,13 @@ export async function applyCascadeStyles(id, signal) {
         #chat-viewport > #conversation,
         #chat-viewport > #cascade,
         #chat-viewport > #chat,
+        #chat-viewport > [data-testid="conversation-view"],
+        #chat-viewport > [data-testid="autoscroll-viewport"],
         #chat-viewport #conversation,
         #chat-viewport #cascade,
-        #chat-viewport #chat {
+        #chat-viewport #chat,
+        #chat-viewport [data-testid="conversation-view"],
+        #chat-viewport [data-testid="autoscroll-viewport"] {
           overflow-y: visible !important;
           overflow-x: hidden !important;
           max-height: none !important;
@@ -1266,4 +1270,8 @@ document.addEventListener('css-update', (e) => {
 document.addEventListener('open-file-preview', handleOpenFilePreview);
 
 // Init on DOM ready
-document.addEventListener('DOMContentLoaded', initChatView);
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initChatView);
+} else {
+  initChatView();
+}

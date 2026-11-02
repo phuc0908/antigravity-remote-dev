@@ -212,7 +212,7 @@ function checkProcessRunning(name) {
     return new Promise((resolve) => {
         const cmd = process.platform === 'darwin'
             ? `pgrep -f "${name}.app/" || pgrep -x "${name}"`
-            : `tasklist /FI "IMAGENAME eq ${name}.exe" /NH`;
+            : `tasklist /NH`;
         exec(cmd, (err, stdout) => {
             if (err) return resolve(false);
             if (process.platform === 'win32') {
@@ -261,6 +261,9 @@ const GENERIC_CHAT_TITLES = new Set([
     'new chat',
     'new conversation',
     'conversation',
+    'conversations',
+    'conversation log',
+    'conver ation log',
     'home',
     'settings',
     'search',
@@ -282,6 +285,18 @@ function isGenericChatTitle(title) {
 function deriveTitleFromWindow(windowTitle) {
     const normalized = normalizeTitle(windowTitle);
     if (!normalized) return '';
+
+    // If it's a webview or server URL with workspaceUri, extract the project folder name
+    if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
+        try {
+            const match = normalized.match(/workspaceUri=[^&]+%2F([^&]+)/i);
+            if (match) {
+                const folder = decodeURIComponent(decodeURIComponent(match[1]));
+                if (folder && !isGenericChatTitle(folder)) return folder;
+            }
+        } catch (e) {}
+        return 'Antigravity Session';
+    }
 
     const parts = normalized
         .split(/[—-]/)
@@ -381,13 +396,15 @@ async function connectCDP(url) {
 
 async function extractMetadata(cdp) {
     const SCRIPT = `(() => {
-        // Support both legacy #cascade and new iframe-based #chat/#conversation
+        // Support Antigravity [data-testid="conversation-view"], #cascade, #chat, #conversation, #root
+        const convView = document.querySelector('[data-testid="conversation-view"]') || document.querySelector('[data-testid="autoscroll-viewport"]');
         const cascade = document.getElementById('cascade');
         const chat = document.getElementById('chat');
         const conversation = document.getElementById('conversation');
-        if (!cascade && !chat && !conversation) return { found: false };
+        const agRoot = document.getElementById('root');
+        if (!convView && !cascade && !chat && !conversation && !agRoot) return { found: false };
 
-        const root = conversation || chat || cascade || document;
+        const root = convView || conversation || chat || cascade || agRoot || document;
         const generic = new Set(['explore', 'agent', 'chat', 'new chat', 'new conversation', 'conversation', 'home', 'settings', 'search']);
         const clean = (v) => String(v || '').replace(/\s+/g, ' ').trim();
         const valid = (v) => {
@@ -447,7 +464,12 @@ async function extractMetadata(cdp) {
             }
         }
 
-        chatTitle = chatTitle || fromDocumentTitle || fromActiveTab || null;
+        let fromWorkspaceUrl = '';
+        try {
+            const match = window.location.href.match(/workspaceUri=file%3A%2F%2F%2F[^&]+%2F([^&]+)/);
+            if (match) fromWorkspaceUrl = decodeURIComponent(match[1]);
+        } catch(e) {}
+        chatTitle = chatTitle || fromDocumentTitle || fromWorkspaceUrl || fromActiveTab || null;
         
         return {
             found: true,
@@ -482,11 +504,11 @@ async function captureCSS(cdp) {
         // Gather CSS and namespace it to prevent leaks
         let css = '';
         function namespaceRule(text) {
-            // Replace body/html/:root/:host selectors with #chat-viewport
-            text = text.replace(/(^|[\\s,}])body(?=[\\s,{:.])/gi, '$1#chat-viewport');
-            text = text.replace(/(^|[\\s,}])html(?=[\\s,{:.])/gi, '$1#chat-viewport');
-            text = text.replace(/(^|[\\s,}]):root(?=[\\s,{])/gi, '$1#chat-viewport');
-            text = text.replace(/(^|[\\s,}]):host(?=[\\s,{(])/gi, '$1#chat-viewport');
+            // Replace body/html/:root/:host selectors with scope targets
+            text = text.replace(/(^|[\\s,}])body(?=[\\s,{:.])/gi, '$1#chat-viewport, $1#chat-mount, $1:host');
+            text = text.replace(/(^|[\\s,}])html(?=[\\s,{:.])/gi, '$1#chat-viewport, $1#chat-mount, $1:host');
+            text = text.replace(/(^|[\\s,}]):root(?=[\\s,{])/gi, '$1#chat-viewport, $1#chat-mount, $1:host');
+            text = text.replace(/(^|[\\s,}]):host(?=[\\s,{(])/gi, '$1#chat-viewport, $1#chat-mount, $1:host');
             return text;
         }
         for (const sheet of document.styleSheets) {
@@ -679,10 +701,13 @@ async function captureHTML(cdp) {
             return parts.join(' > ');
         }
 
-        // Support both legacy #cascade and new iframe-based #conversation/#chat
-        const target = document.getElementById('cascade') 
+        // Prefer targeted conversation containers in Antigravity IDE, with legacy fallbacks
+        const target = document.querySelector('[data-testid="conversation-view"]')
+            || document.querySelector('[data-testid="autoscroll-viewport"]')
+            || document.getElementById('cascade') 
             || document.getElementById('conversation') 
-            || document.getElementById('chat');
+            || document.getElementById('chat')
+            || document.getElementById('root');
         if (!target) return { error: 'chat container not found' };
         
         // Annotate clickable elements for click passthrough
@@ -695,15 +720,22 @@ async function captureHTML(cdp) {
 
         const clone = target.cloneNode(true);
 
-        // Fix overflow clipping: remove classes that clip content in web context
+        // Fix overflow clipping & screen height constraints in web context
+        const sanitizeClassString = (cls) => {
+            if (typeof cls !== 'string') return cls;
+            return cls
+                .replace(/\boverflow-y-hidden\b/g, 'overflow-y-visible')
+                .replace(/\boverflow-x-clip\b/g, '')
+                .replace(/\boverflow-hidden\b/g, 'overflow-visible')
+                .replace(/\bh-\[100dvh\]\b/g, 'h-full')
+                .replace(/\bw-screen\b/g, 'w-full');
+        };
+
+        if (typeof clone.className === 'string') {
+            clone.className = sanitizeClassString(clone.className);
+        }
         clone.querySelectorAll('[class]').forEach(el => {
-            const cls = el.className;
-            if (typeof cls === 'string' && (cls.includes('overflow-y-hidden') || cls.includes('overflow-x-clip') || cls.includes('overflow-hidden'))) {
-                el.className = cls
-                    .replace(/\boverflow-y-hidden\b/g, 'overflow-y-visible')
-                    .replace(/\boverflow-x-clip\b/g, '')
-                    .replace(/\boverflow-hidden\b/g, 'overflow-visible');
-            }
+            el.className = sanitizeClassString(el.className);
         });
 
         // Tag clone elements with matching indexes
@@ -720,12 +752,38 @@ async function captureHTML(cdp) {
             }
         });
 
-        // Remove input box to keep snapshot clean
-        const editor = clone.querySelector('[contenteditable="true"]');
-        if (editor) {
-            const editorContainer = editor.closest('div[class*="relative"]') || editor.parentElement;
-            if (editorContainer && editorContainer !== clone) editorContainer.remove();
+        // Hide composer/prompt editor to keep snapshot clean without deleting conversation history
+        const composer = clone.querySelector('#antigravity\\\\.agentSidePanelInputBox, [class*="surface-composer"]');
+        if (composer) {
+            composer.style.display = 'none';
         }
+        const editor = clone.querySelector('[contenteditable="true"]') || clone.querySelector('textarea');
+        if (editor) {
+            const inputContainer = editor.closest('form, [class*="chat-input"], [class*="prompt"], [class*="input-container"]') 
+                || editor.parentElement;
+            const hasMessages = inputContainer && inputContainer.querySelector('[data-turn-id], [class*="message"], [class*="prose"], [class*="chat-item"], pre, code');
+            if (inputContainer && inputContainer !== clone && !hasMessages) {
+                inputContainer.style.display = 'none';
+            } else {
+                editor.style.display = 'none';
+            }
+        }
+
+        // Clean up desktop-only UI clutter from clone for mobile
+        // 1. Remove rail navigation dots column
+        clone.querySelectorAll('[data-testid="conversation-navigator"], .pointer-events-none.absolute.inset-y-0.left-0.z-10.w-7').forEach(el => el.remove());
+
+        // 2. Remove bottom gradient overlay that produces dark smudge over mobile messages
+        clone.querySelectorAll('[style*="linear-gradient"], [class*="absolute"][class*="bottom-0"][class*="inset-x-4"]').forEach(el => el.remove());
+
+        // 3. Remove sticky positioning and bleed classes from message bubbles so content scrolls smoothly
+        clone.querySelectorAll('[role="article"]').forEach(el => {
+            el.classList.remove('sticky', 'top-0', 'z-10');
+            el.style.position = 'relative';
+        });
+        clone.querySelectorAll('.md-sticky-message-bleed').forEach(el => {
+            el.classList.remove('md-sticky-message-bleed');
+        });
 
         // Move dialog overlays (e.g. Confirm Undo) to end of DOM tree.
         // In Shadow DOM, position:fixed z-index is limited by stacking context —
@@ -799,8 +857,13 @@ async function discover() {
     const allTargets = [];
     await Promise.all(PORTS.map(async (port) => {
         const list = await getJson(`http://127.0.0.1:${port}/json/list`);
-        const workbenches = list.filter(t => t.url?.includes('workbench.html') || t.title?.includes('workbench'));
-        workbenches.forEach(t => {
+        const relevantTargets = list.filter(t => 
+            t.url?.includes('workbench.html') || 
+            t.title?.includes('workbench') ||
+            t.url?.includes('/c/') ||
+            t.url?.includes('extensionView=true')
+        );
+        relevantTargets.forEach(t => {
             allTargets.push({ ...t, port });
         });
     }));
@@ -1046,6 +1109,8 @@ async function main() {
         res.redirect('/login.html');
     });
 
+    // Serve dist static assets first (React PWA), fallback to public
+    app.use(express.static(join(__dirname, 'dist')));
     app.use(express.static(join(__dirname, 'public')));
 
     // --- Launch Antigravity ---
@@ -1067,7 +1132,7 @@ async function main() {
                 console.log('🛑 Killing existing Antigravity (no debug port)...');
                 const killCmd = process.platform === 'darwin'
                     ? 'osascript -e \'quit app "Antigravity"\' 2>/dev/null; sleep 1; pkill -f "Antigravity.app/" 2>/dev/null || true'
-                    : 'taskkill /IM Antigravity.exe /F 2>nul || echo done';
+                    : 'taskkill /IM "Antigravity IDE.exe" /F 2>nul & taskkill /IM Antigravity.exe /F 2>nul || echo done';
                 await new Promise((resolve) => {
                     exec(killCmd, () => resolve());
                 });
@@ -1128,7 +1193,7 @@ async function main() {
             // 2. Kill OS processes
             const killCmd = process.platform === 'darwin'
                 ? 'osascript -e \'quit app "Antigravity"\' 2>/dev/null; sleep 1; pkill -f "Antigravity.app/" 2>/dev/null || true'
-                : 'taskkill /IM Antigravity.exe /F 2>nul || echo done';
+                : 'taskkill /IM "Antigravity IDE.exe" /F 2>nul & taskkill /IM Antigravity.exe /F 2>nul || echo done';
 
             await new Promise((resolve) => {
                 exec(killCmd, (err, stdout, stderr) => {
@@ -1280,19 +1345,29 @@ async function main() {
                 let opened = false;
                 let method = 'none';
 
-                // 1. Try the `antigravity` CLI tool (most reliable, like `code` for VS Code)
+                // 1. Try launching via ANTIGRAVITY_PATH on Windows or `antigravity` CLI
                 try {
-                    child = spawn('antigravity', [folder, '--new-window'], {
-                        detached: true, stdio: 'ignore',
-                        env: { ...process.env }
+                    if (process.platform === 'win32') {
+                        child = spawn(ANTIGRAVITY_PATH, [folder, '--new-window'], {
+                            detached: true,
+                            stdio: 'ignore'
+                        });
+                    } else {
+                        child = spawn('antigravity', [folder, '--new-window'], {
+                            detached: true,
+                            stdio: 'ignore',
+                            env: { ...process.env }
+                        });
+                    }
+                    child.on('error', (err) => {
+                        console.warn('⚠️ Spawn error:', err.message);
                     });
-                    child.on('error', () => { }); // suppress
                     child.unref();
                     opened = true;
-                    method = 'cli';
-                    console.log(`✅ Opened via 'antigravity' CLI`);
+                    method = 'executable';
+                    console.log(`✅ Opened project folder via Antigravity`);
                 } catch (e) {
-                    console.warn('⚠️ antigravity CLI failed:', e.message);
+                    console.warn('⚠️ antigravity launch failed:', e.message);
                 }
 
                 // 2. Fallback: CDP spawn from within Electron renderer
@@ -2363,7 +2438,12 @@ async function main() {
 
             const result = await c.cdp.call('Runtime.evaluate', {
                 expression: `(() => {
-                    const target = document.getElementById('cascade') || document.getElementById('conversation') || document.getElementById('chat');
+                    const target = document.querySelector('[data-testid="conversation-view"]')
+                        || document.querySelector('[data-testid="autoscroll-viewport"]')
+                        || document.getElementById('cascade')
+                        || document.getElementById('conversation')
+                        || document.getElementById('chat')
+                        || document.getElementById('root');
                     if (!target) return { error: 'no target' };
                     function findScrollable(el, depth) {
                         if (depth > 8) return null;
@@ -2441,7 +2521,7 @@ async function main() {
         try {
             const result = await c.cdp.call('Runtime.evaluate', {
                 expression: `(() => {
-                    const btn = document.querySelector('[data-tooltip-id="new-conversation-tooltip"]');
+                    const btn = document.querySelector('[data-tooltip-id="new-conversation-tooltip"]') || document.querySelector('button[aria-label*="New Conversation" i]');
                     if (btn) { btn.click(); return { ok: true }; }
                     return { ok: false, reason: 'new-conversation button not found' };
                 })()`,
@@ -2525,6 +2605,19 @@ async function main() {
             return;
         }
         broadcastCascadeList(); // Send list on connect
+
+        // Immediately push latest state to the newly connected client
+        for (const [id, c] of cascades.entries()) {
+            if (c.snapshot) {
+                ws.send(JSON.stringify({ type: 'snapshot_update', cascadeId: id }));
+            }
+            if (c.css) {
+                ws.send(JSON.stringify({ type: 'css_update', cascadeId: id }));
+            }
+            if (c.quota) {
+                ws.send(JSON.stringify({ type: 'quota_update', cascadeId: id, quota: c.quota }));
+            }
+        }
 
         // Handle terminal input via WS
         ws.on('message', (raw) => {

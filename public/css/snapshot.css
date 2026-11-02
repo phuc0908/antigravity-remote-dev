@@ -124,3 +124,104 @@ button[aria-label*="copy"]:active,
   z-index: 10000 !important;
   position: relative;
 }
+
+/* ============================================
+   Antigravity IDE Layout & Viewport Adaptations
+   ============================================ */
+#root, #chat-mount, #chat-viewport, .chat-viewport,
+[data-testid="conversation-view"], [data-testid="autoscroll-viewport"],
+[class*="conversation-view"], [class*="agy-shell"] {
+  width: 100% !important;
+  max-width: 100% !important;
+  box-sizing: border-box !important;
+}
+
+[data-testid="conversation-view"],
+[data-testid="autoscroll-viewport"] {
+  height: auto !important;
+  min-height: 100% !important;
+  overflow-y: visible !important;
+  overflow-x: hidden !important;
+}
+
+/* Hide rail dots column and desktop turn indicators on mobile */
+.pointer-events-none.absolute.inset-y-0.left-0.z-10.w-7,
+[data-testid="conversation-navigator"] {
+  display: none !important;
+}
+
+/* Eliminate dark gradient overlays & sticky smudges */
+.absolute.bottom-0[style*="linear-gradient"],
+[style*="linear-gradient(to top"],
+[style*="linear-gradient(to bottom"],
+[style*="linear-gradient"],
+.md-sticky-message-bleed::after,
+.md-sticky-message-bleed::before,
+[class*="md-sticky-message-bleed"]::after,
+[class*="md-sticky-message-bleed"]::before,
+[class*="after:bg-gradient"],
+[class*="before:bg-gradient"] {
+  display: none !important;
+  content: none !important;
+  background: transparent !important;
+}
+
+/* Unstick user messages so they scroll naturally like a mobile chat */
+[role="article"].sticky,
+[role="article"][class*="sticky"],
+[class*="sticky"][class*="top-0"] {
+  position: relative !important;
+  top: auto !important;
+  z-index: 1 !important;
+}
+
+/* User message bubble styling for mobile */
+[role="article"][aria-label="User message"] {
+  background: var(--vscode-editor-inactiveSelectionBackground, rgba(9, 105, 218, 0.08)) !important;
+  border: 1px solid var(--vscode-input-border, rgba(128, 128, 128, 0.2)) !important;
+  border-radius: 16px !important;
+  padding: 10px 14px !important;
+  margin-top: 10px !important;
+  margin-bottom: 14px !important;
+  max-width: 95% !important;
+}
+
+/* Mobile chat typography & comfortable padding */
+[data-testid="conversation-view"] {
+  padding: 12px 14px 32px 14px !important;
+}
+
+[data-testid="conversation-view"] p,
+[data-testid="conversation-view"] li {
+  font-size: 15px !important;
+  line-height: 1.6 !important;
+}
+
+/* Ensure composer/prompt editor inside clone is hidden */
+#antigravity\.agentSidePanelInputBox,
+[class*="surface-composer"] {
+  display: none !important;
+}
+
+[class*="w-screen"] {
+  width: 100% !important;
+  max-width: 100% !important;
+}
+
+[class*="h-\[100dvh\]"], [class*="h-screen"] {
+  height: auto !important;
+  min-height: 100% !important;
+}
+
+/* Ensure message list inside Antigravity is scrollable and visible */
+[class*="overflow-y-auto"], [class*="overflow-auto"], [class*="overflow-y-scroll"] {
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch !important;
+  max-height: none !important;
+}
+
+/* Ensure text in chat messages is selectable and clear */
+[class*="message"], [class*="prose"], p, span, pre, code {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}

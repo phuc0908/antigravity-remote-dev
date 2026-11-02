@@ -41,8 +41,17 @@ export function connectWS(): void {
       case 'cascade_list': {
         const cascades = msg.cascades as Parameters<typeof store.setCascades>[0];
         store.setCascades(cascades);
-        if (!store.currentCascadeId && cascades.length > 0) {
-          store.setCurrentCascadeId(cascades[0].id);
+        const targetId = store.currentCascadeId || (cascades.length > 0 ? cascades[0].id : null);
+        if (!store.currentCascadeId && targetId) {
+          store.setCurrentCascadeId(targetId);
+        }
+        if (targetId) {
+          void getSnapshot(targetId).then((snap) => {
+            useAppStore.getState().setSnapshot(targetId, snap);
+          }).catch(() => {});
+          void getStyles(targetId).then((styles) => {
+            useAppStore.getState().setStyles(targetId, styles);
+          }).catch(() => {});
         }
         break;
       }
